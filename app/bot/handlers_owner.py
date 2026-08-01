@@ -122,8 +122,45 @@ async def cmd_status(message: Message) -> None:
         f"· CRM key: {crm.masked_key()} · sync={'on' if cfg.get('crm_sync') else 'off'}\n"
         f"· LLM keys: {'OK' if keys_ok else 'EMPTY'} · Groq {groq_n} / Gemini {gemini_n}\n"
         f"· Режим: {cfg.get('reply_mode')} · STT: {(cfg.get('stt') or {}).get('enabled')}\n"
-        "· Связь: Пульт → вкладка «Связь»"
+        "· Диалоги в Mini App работают только после «Связь → Подключить бота»\n"
+        "· Сброс воронки чата: /reset"
     )
+
+
+@router.message(Command("reset"))
+async def cmd_reset(message: Message) -> None:
+    """Reset local sales state so 'привет' starts Msg1 again."""
+    if settings.owner_chat_id and message.chat.id != settings.owner_chat_id:
+        return
+    parts = (message.text or "").split()
+    async with SessionLocal() as session:
+        if len(parts) >= 2 and parts[1].lstrip("-").isdigit():
+            chat_id = int(parts[1])
+            dialog = await session.scalar(select(Dialog).where(Dialog.chat_id == chat_id))
+            if not dialog:
+                await message.answer(f"Диалог {chat_id} не найден")
+                return
+            dialog.state = "NEW"
+            dialog.brief_json = None
+            dialog.takeover_until = None
+            dialog.paused_until = None
+            await session.commit()
+            await message.answer(f"Сброшен диалог {chat_id} → NEW")
+        else:
+            rows = (await session.execute(select(Dialog))).scalars().all()
+            n = 0
+            for dialog in rows:
+                dialog.state = "NEW"
+                dialog.brief_json = None
+                dialog.takeover_until = None
+                dialog.paused_until = None
+                n += 1
+            await session.commit()
+            await message.answer(
+                f"Сброшено диалогов: {n} → NEW.\n"
+                "Клиент может снова написать «привет»."
+            )
+
 
 
 @router.message(Command("crm_key"))

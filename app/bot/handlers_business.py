@@ -63,6 +63,10 @@ async def _log_event(session, event_type: str, chat_id: int | None, payload: dic
 
 async def _push_dialog_to_crm(dialog: Dialog) -> None:
     if not crm.enabled:
+        logger.warning(
+            "Skip dialog sync chat=%s — CRM not connected (Mini App → Связь → Подключить бота)",
+            dialog.chat_id,
+        )
         return
     try:
         await crm.upsert_dialog(

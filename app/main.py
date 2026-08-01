@@ -106,7 +106,7 @@ async def set_menu_button(bot: Bot, log: logging.Logger) -> None:
                 web_app=WebAppInfo(url=url),
             )
         )
-        log.info("Menu button → %s", url)
+        log.info("Menu button -> %s", url)
     except Exception as exc:  # noqa: BLE001
         log.warning("set_chat_menu_button failed: %s", exc)
 

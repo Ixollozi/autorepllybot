@@ -83,6 +83,20 @@ def parse_fork(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+_RESTART_RE = re.compile(
+    r"(?is)^\s*("
+    r"привет|здравствуйте|здравствуй|добрый\s+день|добрый\s+вечер|доброе\s+утро|"
+    r"hello|hi|хай|салам|assalomu\s+alaykum|ассалому\s+алейкум|"
+    r"заново|сначала|начать\s+сначала|reset|/start|старт"
+    r")[\s!.…]*$"
+)
+
+
+def is_restart_intent(text: str) -> bool:
+    """User cleared chat / says hi again — restart funnel, don't stay on WAIT_FORK."""
+    return bool(_RESTART_RE.match((text or "").strip()))
+
+
 def is_tz_confirm(text: str) -> bool:
     t = (text or "").strip().lower()
     return any(
@@ -194,6 +208,15 @@ async def handle_sales_turn(
 
     st = DialogState(state) if state in DialogState._value2member_map_ else DialogState.NEW
 
+    # Deleting TG history does not clear SQLite — greeting restarts the funnel.
+    if is_restart_intent(user_text) and st not in (
+        DialogState.NEW,
+        DialogState.GREETING_QUALIFY,
+    ):
+        logger.info("Restart intent from state=%s → NEW", st.value)
+        brief = {}
+        st = DialogState.NEW
+
     if asks_manager(user_text):
         return SalesResult(
             "Подключаю менеджера — он напишет здесь по задаче и расчёту.",
@@ -268,9 +291,11 @@ async def handle_sales_turn(
     if st in (DialogState.MSG1_COMBO_SENT, DialogState.WAIT_FORK):
         fork = parse_fork(user_text)
         if not fork:
-            # soft re-ask
             return SalesResult(
-                "Напишите «1» или «2» — так быстрее зафиксируем формат.",
+                "Чтобы двигаться дальше, выберите формат:\n"
+                "1) лендинг / сайт под заявки\n"
+                "2) Telegram-бот / автоматизация\n\n"
+                "Напишите «1» или «2». Или «привет» — начнём заново.",
                 DialogState.WAIT_FORK.value,
                 brief,
                 assist_only=(mode == "ASSIST"),
