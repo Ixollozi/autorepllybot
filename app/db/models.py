@@ -38,6 +38,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "tempo": "human",
     "scope": "work_only",
     "crm_sync": True,
+    "crm_base_url": "",
+    "crm_api_key": "",
     "limits": {"max_out_per_chat_hour": 8, "max_chars": 900},
     "ignore_list": [],
 }
