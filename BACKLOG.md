@@ -1,87 +1,96 @@
 # AutoReply — backlog (не потерять)
 
-**Дата фиксации:** 2026-08-01  
-**Источник:** обсуждение + [`TZ.md`](TZ.md) + план реализации  
-**Статус кода:** фазы 0–2 в репозитории реализованы; ниже — ops, дырки v1 и отложенное.
+**Дата фиксации:** 2026-08-01 · обновлено: Mini App как целевой UX  
+**Источник:** обсуждение + [`TZ.md`](TZ.md) + [`MINIAPP.md`](MINIAPP.md)  
+**Статус кода:** фазы 0–2 runtime в репо; **пульт управления → Telegram Mini App в CRM** (`/mini_app`).
 
-Читать этот файл перед любой новой итерацией по автоответчику.
+Читать этот файл + `MINIAPP.md` перед новой итерацией.
+
+---
+
+## 0. Стратегия UX (новое)
+
+- **Не развивать** сложные inline-настройки в чате бота.
+- **Цель:** Mini App на `https://crm.neosamptech.uz/mini_app` — режимы, пресеты, диалоги, ASSIST approve.
+- Бот в TG = inbox + алерты + кнопка «Открыть пульт».
+- Детали: [`MINIAPP.md`](MINIAPP.md).
+
+### Mini App roadmap
+- [x] **M0** Shell `/mini_app` + initData auth + Menu Button
+- [x] **M1** Settings + пресеты (SoT в CRM, бот pull)
+- [x] **M2** Диалоги + takeover из Mini App (read-model + actions; sync с бота)
+- [ ] **M3** ASSIST drafts approve/discard
+- [ ] **M4** Deep links из алертов, stats, multi-op
 
 ---
 
 ## A. Ops (блокер запуска на проде)
 
-- [ ] Задеплоить NSTLeadGen с `/api/integrations/autoreply` на `https://crm.neosamptech.uz`
-- [ ] Прописать `AUTOREPLY_API_KEY` в `.env` CRM (и тот же ключ у бота)
-- [ ] Проверить `GET /api/integrations/autoreply/llm-keys` с ключом
-- [ ] Убедиться, что в CRM Настройки → AI есть ключи Groq (и Gemini как fallback)
+- [ ] Задеплоить NSTLeadGen с `/api/integrations/autoreply` + UI ключа AutoReply на `https://crm.neosamptech.uz`
+- [ ] В CRM Настройки → **AutoReply · API-ключ** → Сгенерировать → скопировать
+- [ ] В боте: `/crm_url https://crm.neosamptech.uz` и `/crm_key ВАШ_КЛЮЧ` (или `.env`)
+- [ ] Проверить `/status` в боте (Groq/Gemini keys > 0)
 - [ ] BotFather: Business / Secretary Mode = On
 - [ ] Рабочий аккаунт: Business → Chatbots → бот + право Reply
-- [ ] Заполнить `.env` бота: `BOT_TOKEN`, `OWNER_CHAT_ID`, `CRM_BASE_URL`, `AUTOREPLY_API_KEY`
-- [ ] Поднять бота (systemd / docker), ffmpeg + Whisper на VPS
-- [ ] Owner: `/start` → `/settings`
-- [ ] Живая приёмка по чеклисту TZ §16 (голос, ответ от аккаунта, takeover, ТЗ без цены, CRM sync)
+- [ ] Поднять бота на VPS (ffmpeg + Whisper)
+- [ ] Живая приёмка по чеклисту TZ §16
 
 См. также [`DEPLOY.md`](DEPLOY.md).
 
----
-
-## B. Дырки v1 (обсуждали / в ТЗ must, в UI или UX ещё нет)
-
-- [ ] **ASSIST approve:** кнопка «✅ Отправить» у черновика (сейчас только показ черновика в inbox)
-- [ ] **Пресеты** одним тапом: Боевой / Осторожный / Только секретарь / Ночной дежурный (TZ §11.3)
-- [ ] **`work_hours`** редактировать из `/settings` (сейчас только дефолт в БД)
-- [ ] **`ignore_list`** управлять из `/settings` (сейчас поле есть, UI нет)
-- [ ] **`OWNER_CHAT_ID`:** автосохранение при первом `/start`, если env пустой (сейчас только лог)
-- [ ] Команда **`/mode`** (в DoD TZ §16; сейчас только cycle в `/settings`)
-- [ ] Inbox-фильтры (все / только голос / только если бот ответил) — частично в ТЗ §11.2 п.8
+**Локальный демо-путь LLM без CRM API:** `GROQ_API_KEY` / `GEMINI_API_KEY` в `.env` бота (fallback).
 
 ---
 
-## C. v1.5 (отложено сознательно)
+## B. Дырки v1 → закрываются через Mini App M1–M3
 
-- [ ] ASSIST approve UX целиком (approve / edit / discard)
-- [ ] Stop-words UI → сразу HUMAN
-- [ ] Niches toggles (dental / retail / edu / generic on/off)
-- [ ] Inbox filters UI
-- [ ] Уточнение takeover на всех типах Business updates (edited / outgoing edge cases)
+Не пилить дальше в inline TG (кроме ссылки на Mini App):
+
+- [ ] ASSIST approve UI → **M3**
+- [ ] Пресеты → **M1**
+- [ ] work_hours / ignore_list UI → **M1**
+- [ ] OWNER_CHAT_ID автосохранение — мелкий фикс бота (можно до Mini App)
+- [ ] `/mode` — заменить пунктом в Mini App + deep link
+- [ ] Inbox-фильтры → **M2**
+
+---
+
+## C. v1.5 (отложено / частично в Mini App)
+
+- [ ] ASSIST approve UX целиком → **M3**
+- [ ] Stop-words UI → M1/M2
+- [ ] Niches toggles → M1
+- [ ] Inbox filters → M2
+- [ ] Takeover edge cases Business updates
 
 ---
 
 ## D. v2 / уровень C (отложено)
 
-- [ ] UZ-first ветка (Combo + бриф на узбекском как first-class)
+- [ ] UZ-first ветка
 - [ ] A/B Msg1 / вилок
 - [ ] Оценка качества ответов
-- [ ] Веб-админка настроек
-- [ ] CRM как LLM-proxy (`POST /api/integrations/llm/chat`) — ключи не уходят боту
-- [ ] Мультиоператор / роли
-- [ ] Per-operator профили
+- [ ] Веб-админка настроек (частично = Mini App + CRM settings)
+- [ ] CRM как LLM-proxy
+- [ ] Мультиоператор / роли → **M4**
 
 ---
 
-## E. Уже сделано (якорь, не переделывать зря)
+## E. Уже сделано (якорь)
 
-- CRM: `AUTOREPLY_API_KEY`, `/api/integrations/autoreply/*` (llm-keys, lookup, upsert, patch, notes, events)
-- CRM: пулы Groq + Gemini в UI/API (были до автоответчика)
-- Бот: Business inbox + STT + takeover/pause + settings cycle
-- Бот: воронка Combo → бриф → ТЗ без цены/сроков сдачи
-- Бот: guards цена/дедлайн, оффтоп, nurture, weekly digest, CRM sync событий
-- Тесты: CRM integration + guards/offtopic/state_machine
-- Доки: `TZ.md`, `README.md`, `DEPLOY.md`, docker/systemd
+- CRM: integration API + UI генерации Autoreply API key (локально)
+- Бот: Business inbox + STT + takeover + sales funnel + CRM sync + `/crm_key`/`/crm_url`
+- Docs: TZ, DEPLOY, BACKLOG, **MINIAPP**
 
 ---
 
-## F. Решения-якоря (не переспрашивать без причины)
+## F. Решения-якоря
 
 | Тема | Решение |
 |------|---------|
-| Идентичность | mask по умолчанию; work-only; оффтоп → отказ + эскалация |
-| Аккаунт | рабочий + Chat Automation, без Telethon |
-| STT | local faster-whisper (бесплатно) |
+| UX управления | **Telegram Mini App в CRM `/mini_app`** |
+| Settings SoT | CRM (после M1); бот — cache/pull |
+| Идентичность | mask; work-only |
+| Аккаунт | рабочий + Chat Automation |
+| STT | local faster-whisper |
 | LLM | ключи из CRM; Groq → Gemini |
-| Ночь | дефолт full_auto, переключается в settings |
-| Q4 срок запуска | в CRM/note, не в клиентское резюме ТЗ |
-| Цена/срок сдачи | бот никогда не называет |
-| CRM sync | с v1 через X-API-Key |
-
-При смене якоря — обновить этот файл и §0.1 в `TZ.md`.
+| Цена/срок сдачи | бот не называет |

@@ -57,6 +57,46 @@ async def update_setting(session: AsyncSession, key: str, value: Any) -> dict[st
     return data
 
 
+# Keys owned by CRM Mini App (bot keeps local CRM credentials).
+CRM_PULLED_KEYS = {
+    "reply_mode",
+    "identity",
+    "night_policy",
+    "work_hours",
+    "sales_depth",
+    "nurture",
+    "escalation",
+    "language",
+    "stt",
+    "tempo",
+    "scope",
+    "crm_sync",
+    "limits",
+    "ignore_list",
+}
+
+
+async def apply_crm_settings(
+    session: AsyncSession, remote: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge CRM SoT settings into local cache; preserve crm_base_url / crm_api_key."""
+    data = await get_settings_dict(session)
+    for key in CRM_PULLED_KEYS:
+        if key in remote:
+            data[key] = remote[key]
+    data["crm_settings_version"] = remote.get("version")
+    row = await session.scalar(
+        select(AppSettings).where(AppSettings.key == SETTINGS_KEY)
+    )
+    payload = json.dumps(data, ensure_ascii=False)
+    if row is None:
+        session.add(AppSettings(key=SETTINGS_KEY, value_json=payload))
+    else:
+        row.value_json = payload
+    await session.commit()
+    return data
+
+
 def is_night(settings: dict[str, Any], now: datetime | None = None) -> bool:
     wh = settings.get("work_hours") or DEFAULT_SETTINGS["work_hours"]
     tz_name = wh.get("tz") or "Asia/Tashkent"

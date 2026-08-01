@@ -7,6 +7,8 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.db.session import SessionLocal
+from app.bot.settings_store import get_settings_dict
 
 logger = logging.getLogger("nst.autoreply.crm")
 
@@ -18,6 +20,17 @@ class CrmClient:
         self._keys_cache: dict[str, Any] | None = None
         self._keys_expires: datetime | None = None
 
+    async def refresh_from_db(self) -> None:
+        """Prefer values saved via /crm_key /crm_url over .env."""
+        async with SessionLocal() as session:
+            cfg = await get_settings_dict(session)
+        url = (cfg.get("crm_base_url") or "").strip() or settings.crm_base_url
+        key = (cfg.get("crm_api_key") or "").strip() or settings.autoreply_api_key
+        self.base = url.rstrip("/")
+        self.api_key = key
+        self._keys_cache = None
+        self._keys_expires = None
+
     def _headers(self) -> dict[str, str]:
         return {"X-API-Key": self.api_key, "Content-Type": "application/json"}
 
@@ -25,7 +38,14 @@ class CrmClient:
     def enabled(self) -> bool:
         return bool(self.api_key and self.base)
 
+    def masked_key(self) -> str:
+        k = self.api_key or ""
+        if len(k) <= 4:
+            return "****" if k else "—"
+        return f"...{k[-4:]}"
+
     async def get_llm_keys(self, force: bool = False) -> dict[str, Any]:
+        await self.refresh_from_db()
         now = datetime.now(timezone.utc)
         if (
             not force
@@ -34,19 +54,34 @@ class CrmClient:
             and now < self._keys_expires
         ):
             return self._keys_cache
+
+        empty = {
+            "groq": {"model": settings.groq_model, "keys": []},
+            "gemini": {"model": settings.gemini_model, "keys": []},
+            "ttl_sec": 300,
+        }
+
         if not self.enabled:
-            return {
-                "groq": {"model": "", "keys": []},
-                "gemini": {"model": "", "keys": []},
-                "ttl_sec": 300,
-            }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{self.base}/api/integrations/autoreply/llm-keys",
-                headers=self._headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            return self._env_fallback_keys(empty)
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    f"{self.base}/api/integrations/autoreply/llm-keys",
+                    headers=self._headers(),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CRM llm-keys failed: %s — using env fallback", exc)
+            return self._env_fallback_keys(empty)
+
+        # merge env fallback if CRM returned empty pools
+        if not (data.get("groq") or {}).get("keys") and not (data.get("gemini") or {}).get(
+            "keys"
+        ):
+            data = self._env_fallback_keys(data)
+
         ttl = int(data.get("ttl_sec") or 300)
         from datetime import timedelta
 
@@ -59,7 +94,30 @@ class CrmClient:
         )
         return data
 
+    def _env_fallback_keys(self, base: dict[str, Any]) -> dict[str, Any]:
+        """Local .env GROQ_/GEMINI_ for demo when CRM unavailable."""
+        out = dict(base)
+        groq_keys = [k for k in [settings.groq_api_key] if k]
+        gemini_keys = [k for k in [settings.gemini_api_key] if k]
+        # also support comma-separated
+        if settings.groq_api_keys:
+            groq_keys = [x.strip() for x in settings.groq_api_keys.split(",") if x.strip()]
+        if settings.gemini_api_keys:
+            gemini_keys = [
+                x.strip() for x in settings.gemini_api_keys.split(",") if x.strip()
+            ]
+        out["groq"] = {
+            "model": settings.groq_model,
+            "keys": groq_keys or list((base.get("groq") or {}).get("keys") or []),
+        }
+        out["gemini"] = {
+            "model": settings.gemini_model,
+            "keys": gemini_keys or list((base.get("gemini") or {}).get("keys") or []),
+        }
+        return out
+
     async def lookup(self, telegram: str) -> dict | None:
+        await self.refresh_from_db()
         if not self.enabled:
             return None
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -74,6 +132,7 @@ class CrmClient:
             return resp.json()
 
     async def upsert(self, payload: dict[str, Any]) -> dict:
+        await self.refresh_from_db()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self.base}/api/integrations/autoreply/upsert",
@@ -84,6 +143,7 @@ class CrmClient:
             return resp.json()
 
     async def patch(self, lead_id: int, payload: dict[str, Any]) -> dict:
+        await self.refresh_from_db()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.patch(
                 f"{self.base}/api/integrations/autoreply/{lead_id}",
@@ -94,6 +154,7 @@ class CrmClient:
             return resp.json()
 
     async def add_note(self, lead_id: int, text: str) -> dict:
+        await self.refresh_from_db()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self.base}/api/integrations/autoreply/{lead_id}/notes",
@@ -113,6 +174,7 @@ class CrmClient:
         patch: dict | None = None,
         payload_json: str | None = None,
     ) -> dict:
+        await self.refresh_from_db()
         body: dict[str, Any] = {
             "external_event_id": external_event_id,
             "event_type": event_type,
@@ -128,6 +190,51 @@ class CrmClient:
                 f"{self.base}/api/integrations/autoreply/{lead_id}/events",
                 headers=self._headers(),
                 json=body,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_settings(self) -> dict[str, Any] | None:
+        await self.refresh_from_db()
+        if not self.enabled:
+            return None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{self.base}/api/integrations/autoreply/settings",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def heartbeat(
+        self, *, business_ok: bool | None = None, version: str | None = None
+    ) -> dict[str, Any] | None:
+        await self.refresh_from_db()
+        if not self.enabled:
+            return None
+        body: dict[str, Any] = {}
+        if business_ok is not None:
+            body["business_ok"] = business_ok
+        if version:
+            body["version"] = version
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                f"{self.base}/api/integrations/autoreply/heartbeat",
+                headers=self._headers(),
+                json=body,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def upsert_dialog(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        await self.refresh_from_db()
+        if not self.enabled:
+            return None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self.base}/api/integrations/autoreply/dialogs/upsert",
+                headers=self._headers(),
+                json=payload,
             )
             resp.raise_for_status()
             return resp.json()

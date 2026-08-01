@@ -60,6 +60,41 @@ async def _log_event(session, event_type: str, chat_id: int | None, payload: dic
     )
 
 
+async def _push_dialog_to_crm(dialog: Dialog) -> None:
+    if not crm.enabled:
+        return
+    try:
+        await crm.upsert_dialog(
+            {
+                "chat_id": dialog.chat_id,
+                "business_connection_id": dialog.business_connection_id,
+                "telegram_username": dialog.telegram_username,
+                "display_name": dialog.display_name,
+                "state": dialog.state,
+                "brief_json": dialog.brief_json,
+                "crm_lead_id": dialog.crm_lead_id,
+                "takeover_until": (
+                    dialog.takeover_until.isoformat() if dialog.takeover_until else None
+                ),
+                "paused_until": (
+                    dialog.paused_until.isoformat() if dialog.paused_until else None
+                ),
+                "language": dialog.language,
+                "niche": dialog.niche,
+                "last_inbound_at": (
+                    dialog.last_inbound_at.isoformat() if dialog.last_inbound_at else None
+                ),
+                "last_outbound_at": (
+                    dialog.last_outbound_at.isoformat()
+                    if dialog.last_outbound_at
+                    else None
+                ),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CRM dialog upsert failed chat=%s: %s", dialog.chat_id, exc)
+
+
 async def _get_or_create_dialog(
     session,
     *,
@@ -263,6 +298,7 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             dialog.state = "HUMAN_TAKEOVER"
             await _log_event(session, "takeover", chat_id, {"reason": "owner_outbound"})
             await session.commit()
+            await _push_dialog_to_crm(dialog)
             if settings.owner_chat_id:
                 await bot.send_message(
                     settings.owner_chat_id,
@@ -446,3 +482,4 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             {"to": result.new_state},
         )
         await session.commit()
+        await _push_dialog_to_crm(dialog)

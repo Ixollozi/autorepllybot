@@ -18,6 +18,15 @@ class Settings(BaseSettings):
 
     crm_base_url: str = "https://crm.neosamptech.uz"
     autoreply_api_key: str = ""
+    miniapp_url: str = "https://crm.neosamptech.uz/mini_app"
+
+    # Optional local LLM fallback when CRM keys unavailable (demo)
+    groq_api_key: str = ""
+    groq_api_keys: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    gemini_api_key: str = ""
+    gemini_api_keys: str = ""
+    gemini_model: str = "gemini-2.0-flash"
 
     whisper_model: str = "base"
     whisper_device: str = "cpu"

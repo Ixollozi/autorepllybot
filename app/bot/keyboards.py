@@ -1,11 +1,20 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+
+from app.config import settings
+
+
+def miniapp_url() -> str:
+    return (settings.miniapp_url or "https://crm.neosamptech.uz/mini_app").rstrip("/")
 
 
 def inbox_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Настройки", callback_data="settings:open"),
+                InlineKeyboardButton(
+                    text="Пульт",
+                    web_app=WebAppInfo(url=miniapp_url()),
+                ),
                 InlineKeyboardButton(
                     text="Пауза чат", callback_data=f"chat:pause:{chat_id}"
                 ),
@@ -22,7 +31,26 @@ def inbox_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def settings_keyboard(settings: dict) -> InlineKeyboardMarkup:
+def owner_home_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Открыть пульт",
+                    web_app=WebAppInfo(url=miniapp_url()),
+                )
+            ],
+            [
+                InlineKeyboardButton(text="Статус", callback_data="settings:status"),
+                InlineKeyboardButton(
+                    text="Быстрые настройки", callback_data="settings:open"
+                ),
+            ],
+        ]
+    )
+
+
+def settings_keyboard(settings_dict: dict) -> InlineKeyboardMarkup:
     def row(label: str, key: str, value: str) -> list[InlineKeyboardButton]:
         return [
             InlineKeyboardButton(
@@ -32,21 +60,27 @@ def settings_keyboard(settings: dict) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            row("Режим", "reply_mode", settings.get("reply_mode", "AUTO")),
-            row("Ночь", "night_policy", settings.get("night_policy", "full_auto")),
-            row("Кто я", "identity", settings.get("identity", "mask")),
-            row("Глубина", "sales_depth", settings.get("sales_depth", "full_tz")),
-            row("Follow-up", "nurture", settings.get("nurture", "soft")),
-            row("Эскалация", "escalation", settings.get("escalation", "normal")),
-            row("Язык", "language", settings.get("language", "auto")),
-            row("Tempo", "tempo", settings.get("tempo", "human")),
             [
                 InlineKeyboardButton(
-                    text=f"STT: {'on' if (settings.get('stt') or {}).get('enabled', True) else 'off'}",
+                    text="Открыть пульт (Mini App)",
+                    web_app=WebAppInfo(url=miniapp_url()),
+                )
+            ],
+            row("Режим", "reply_mode", settings_dict.get("reply_mode", "AUTO")),
+            row("Ночь", "night_policy", settings_dict.get("night_policy", "full_auto")),
+            row("Кто я", "identity", settings_dict.get("identity", "mask")),
+            row("Глубина", "sales_depth", settings_dict.get("sales_depth", "full_tz")),
+            row("Follow-up", "nurture", settings_dict.get("nurture", "soft")),
+            row("Эскалация", "escalation", settings_dict.get("escalation", "normal")),
+            row("Язык", "language", settings_dict.get("language", "auto")),
+            row("Tempo", "tempo", settings_dict.get("tempo", "human")),
+            [
+                InlineKeyboardButton(
+                    text=f"STT: {'on' if (settings_dict.get('stt') or {}).get('enabled', True) else 'off'}",
                     callback_data="settings:toggle:stt",
                 ),
                 InlineKeyboardButton(
-                    text=f"CRM: {'on' if settings.get('crm_sync', True) else 'off'}",
+                    text=f"CRM: {'on' if settings_dict.get('crm_sync', True) else 'off'}",
                     callback_data="settings:toggle:crm_sync",
                 ),
             ],

@@ -8,7 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
-from app.bot.keyboards import SETTINGS_CYCLES, settings_keyboard
+from app.bot.keyboards import SETTINGS_CYCLES, owner_home_keyboard, settings_keyboard
 from app.bot.settings_store import get_settings_dict, update_setting
 from app.config import settings
 from app.crm.client import crm
@@ -41,8 +41,8 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "NST AutoReply inbox готов.\n"
         f"Режим: {cfg.get('reply_mode')} · ночь: {cfg.get('night_policy')}\n"
-        "Команды: /settings /status",
-        reply_markup=settings_keyboard(cfg),
+        "Пульт управления — Mini App. Команды: /settings /status",
+        reply_markup=owner_home_keyboard(),
     )
 
 
@@ -59,23 +59,66 @@ async def cmd_settings(message: Message) -> None:
 async def cmd_status(message: Message) -> None:
     if settings.owner_chat_id and message.chat.id != settings.owner_chat_id:
         return
+    await crm.refresh_from_db()
     keys_ok = False
     groq_n = gemini_n = 0
     try:
         data = await crm.get_llm_keys(force=True)
         groq_n = len((data.get("groq") or {}).get("keys") or [])
         gemini_n = len((data.get("gemini") or {}).get("keys") or [])
-        keys_ok = True
+        keys_ok = groq_n + gemini_n > 0
     except Exception as exc:  # noqa: BLE001
         logger.warning("CRM keys status failed: %s", exc)
     async with SessionLocal() as session:
         cfg = await get_settings_dict(session)
     await message.answer(
         "Статус:\n"
-        f"· CRM: {'OK' if keys_ok else 'FAIL'} · Groq {groq_n} / Gemini {gemini_n}\n"
+        f"· CRM URL: {crm.base or '—'}\n"
+        f"· CRM key: {crm.masked_key()} · sync={'on' if cfg.get('crm_sync') else 'off'}\n"
+        f"· LLM keys: {'OK' if keys_ok else 'EMPTY'} · Groq {groq_n} / Gemini {gemini_n}\n"
         f"· Режим: {cfg.get('reply_mode')} · STT: {(cfg.get('stt') or {}).get('enabled')}\n"
-        f"· CRM sync: {cfg.get('crm_sync')}"
+        "· Команды: /crm_key /crm_url /settings"
     )
+
+
+@router.message(Command("crm_key"))
+async def cmd_crm_key(message: Message) -> None:
+    if settings.owner_chat_id and message.chat.id != settings.owner_chat_id:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "Использование: /crm_key ВАШ_КЛЮЧ\n"
+            "Ключ берёте в CRM → Настройки → AutoReply · API-ключ → Сгенерировать."
+        )
+        return
+    key = parts[1].strip()
+    async with SessionLocal() as session:
+        await update_setting(session, "crm_api_key", key)
+    await crm.refresh_from_db()
+    # delete message with secret if possible
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    await message.answer(f"CRM API-ключ сохранён ({crm.masked_key()}). Проверка: /status")
+
+
+@router.message(Command("crm_url"))
+async def cmd_crm_url(message: Message) -> None:
+    if settings.owner_chat_id and message.chat.id != settings.owner_chat_id:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "Использование: /crm_url https://crm.neosamptech.uz"
+        )
+        return
+    url = parts[1].strip().rstrip("/")
+    async with SessionLocal() as session:
+        await update_setting(session, "crm_base_url", url)
+    await crm.refresh_from_db()
+    await message.answer(f"CRM URL сохранён: {url}")
 
 
 @router.callback_query(F.data == "settings:open")
