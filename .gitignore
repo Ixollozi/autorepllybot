@@ -1,0 +1,67 @@
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# App runtime
+data/
+logs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.session
+*.session-journal
+
+# Whisper / ML caches
+.cache/
+whisper-cache/
+*.bin
+*.pt
+*.onnx
+
+# Media temp
+tmp/
+temp/
+*.ogg
+*.wav
+*.mp3
+!prompts/**
+
+# Docker / local overrides
+docker-compose.override.yml
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Cursor / agent local
+.cursor/
+*.pid
+.nst*.pids

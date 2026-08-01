@@ -1,0 +1,15 @@
+[Unit]
+Description=NST AutoReply Telegram bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nst-autoreply
+EnvironmentFile=/opt/nst-autoreply/.env
+ExecStart=/opt/nst-autoreply/.venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
