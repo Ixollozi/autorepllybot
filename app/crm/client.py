@@ -239,5 +239,16 @@ class CrmClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def claim_setup(self, code: str, *, base_url: str | None = None) -> dict[str, Any]:
+        """Bootstrap CRM URL + API key via one-time Mini App claim code (no prior key)."""
+        base = (base_url or self.base or settings.crm_base_url).rstrip("/")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{base}/api/integrations/autoreply/claim",
+                json={"code": code},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
 
 crm = CrmClient()

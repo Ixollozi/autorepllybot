@@ -30,18 +30,62 @@ async def cmd_start(message: Message) -> None:
     if settings.owner_chat_id and message.chat.id != settings.owner_chat_id:
         await message.answer("Этот бот — служебный inbox NST AutoReply.")
         return
-    # If OWNER_CHAT_ID empty, treat first starter as owner (logged)
     if not settings.owner_chat_id:
         logger.warning(
             "OWNER_CHAT_ID not set — using chat_id=%s. Set it in .env",
             message.chat.id,
         )
+
+    parts = (message.text or "").split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if payload.lower().startswith("c_"):
+        code = payload[2:].strip()
+        try:
+            data = await crm.claim_setup(code)
+            url = (data.get("crm_base_url") or "").rstrip("/")
+            key = (data.get("api_key") or "").strip()
+            if not url or not key:
+                raise RuntimeError("empty claim payload")
+            async with SessionLocal() as session:
+                await update_setting(session, "crm_base_url", url)
+                await update_setting(session, "crm_api_key", key)
+            await crm.refresh_from_db()
+            try:
+                await crm.heartbeat(business_ok=None, version="1.0")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("heartbeat after claim failed: %s", exc)
+            keys_ok = False
+            groq_n = gemini_n = 0
+            try:
+                llm = await crm.get_llm_keys(force=True)
+                groq_n = len((llm.get("groq") or {}).get("keys") or [])
+                gemini_n = len((llm.get("gemini") or {}).get("keys") or [])
+                keys_ok = groq_n + gemini_n > 0
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("llm after claim failed: %s", exc)
+            await message.answer(
+                "CRM подключена из Mini App.\n"
+                f"· URL: {url}\n"
+                f"· Key: {crm.masked_key()}\n"
+                f"· LLM: {'OK' if keys_ok else 'EMPTY'} · Groq {groq_n} / Gemini {gemini_n}\n"
+                "Дальше — Пульт или /status",
+                reply_markup=owner_home_keyboard(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("claim failed: %s", exc)
+            await message.answer(
+                "Не удалось принять код из пульта (истёк или уже использован).\n"
+                "Откройте Пульт → Связь → «Подключить бота» ещё раз."
+            )
+        return
+
     async with SessionLocal() as session:
         cfg = await get_settings_dict(session)
     await message.answer(
         "NST AutoReply inbox готов.\n"
         f"Режим: {cfg.get('reply_mode')} · ночь: {cfg.get('night_policy')}\n"
-        "Пульт управления — Mini App. Команды: /settings /status",
+        "Пульт → Связь → «Подключить бота», если CRM ещё не связана.\n"
+        "Команды: /settings /status",
         reply_markup=owner_home_keyboard(),
     )
 
@@ -77,7 +121,7 @@ async def cmd_status(message: Message) -> None:
         f"· CRM key: {crm.masked_key()} · sync={'on' if cfg.get('crm_sync') else 'off'}\n"
         f"· LLM keys: {'OK' if keys_ok else 'EMPTY'} · Groq {groq_n} / Gemini {gemini_n}\n"
         f"· Режим: {cfg.get('reply_mode')} · STT: {(cfg.get('stt') or {}).get('enabled')}\n"
-        "· Команды: /crm_key /crm_url /settings"
+        "· Связь: Пульт → вкладка «Связь»"
     )
 
 
