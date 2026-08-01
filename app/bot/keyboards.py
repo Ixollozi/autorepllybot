@@ -3,21 +3,22 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from app.config import settings
 
 
-def miniapp_url() -> str:
-    return (settings.miniapp_url or "https://crm.neosamptech.uz/mini_app").rstrip("/")
+def miniapp_url(path: str = "") -> str:
+    base = (settings.miniapp_url or "https://crm.neosamptech.uz/mini_app").rstrip("/")
+    if not path:
+        return base
+    return f"{base}{path if path.startswith('?') or path.startswith('/') else '/' + path}"
 
 
 def inbox_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """Compact actions for voice/escalation cards only."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Пульт",
-                    web_app=WebAppInfo(url=miniapp_url()),
-                ),
-                InlineKeyboardButton(
-                    text="Пауза чат", callback_data=f"chat:pause:{chat_id}"
-                ),
+                    text="Открыть пульт",
+                    web_app=WebAppInfo(url=miniapp_url(f"?dialog={chat_id}")),
+                )
             ],
             [
                 InlineKeyboardButton(
@@ -39,59 +40,14 @@ def owner_home_keyboard() -> InlineKeyboardMarkup:
                     text="Открыть пульт",
                     web_app=WebAppInfo(url=miniapp_url()),
                 )
-            ],
-            [
-                InlineKeyboardButton(text="Статус", callback_data="settings:status"),
-                InlineKeyboardButton(
-                    text="Быстрые настройки", callback_data="settings:open"
-                ),
-            ],
+            ]
         ]
     )
 
 
-def settings_keyboard(settings_dict: dict) -> InlineKeyboardMarkup:
-    def row(label: str, key: str, value: str) -> list[InlineKeyboardButton]:
-        return [
-            InlineKeyboardButton(
-                text=f"{label}: {value}", callback_data=f"settings:cycle:{key}"
-            )
-        ]
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Открыть пульт (Mini App)",
-                    web_app=WebAppInfo(url=miniapp_url()),
-                )
-            ],
-            row("Режим", "reply_mode", settings_dict.get("reply_mode", "AUTO")),
-            row("Ночь", "night_policy", settings_dict.get("night_policy", "full_auto")),
-            row("Кто я", "identity", settings_dict.get("identity", "mask")),
-            row("Глубина", "sales_depth", settings_dict.get("sales_depth", "full_tz")),
-            row("Follow-up", "nurture", settings_dict.get("nurture", "soft")),
-            row("Эскалация", "escalation", settings_dict.get("escalation", "normal")),
-            row("Язык", "language", settings_dict.get("language", "auto")),
-            row("Tempo", "tempo", settings_dict.get("tempo", "human")),
-            [
-                InlineKeyboardButton(
-                    text=f"STT: {'on' if (settings_dict.get('stt') or {}).get('enabled', True) else 'off'}",
-                    callback_data="settings:toggle:stt",
-                ),
-                InlineKeyboardButton(
-                    text=f"CRM: {'on' if settings_dict.get('crm_sync', True) else 'off'}",
-                    callback_data="settings:toggle:crm_sync",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Тест карточки", callback_data="settings:test_card"
-                ),
-                InlineKeyboardButton(text="Статус", callback_data="settings:status"),
-            ],
-        ]
-    )
+# Kept for rare callback fallbacks — Mini App is the real settings UI.
+def settings_keyboard(_settings_dict: dict) -> InlineKeyboardMarkup:
+    return owner_home_keyboard()
 
 
 SETTINGS_CYCLES = {

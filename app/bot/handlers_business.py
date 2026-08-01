@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.bot.keyboards import inbox_keyboard
 from app.bot.settings_store import effective_reply_mode, get_settings_dict
+from app.brain.guards import guard_client_text
 from app.brain.sales import handle_sales_turn
 from app.config import settings
 from app.crm.client import crm
@@ -93,6 +94,26 @@ async def _push_dialog_to_crm(dialog: Dialog) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("CRM dialog upsert failed chat=%s: %s", dialog.chat_id, exc)
+
+
+async def _push_message(
+    chat_id: int,
+    role: str,
+    text: str,
+    *,
+    tg_message_id: int | None = None,
+) -> None:
+    if not (text or "").strip():
+        return
+    try:
+        await crm.append_message(
+            chat_id=chat_id,
+            role=role,
+            text=text.strip(),
+            tg_message_id=tg_message_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CRM message append failed chat=%s: %s", chat_id, exc)
 
 
 async def _get_or_create_dialog(
@@ -361,37 +382,45 @@ async def on_business_message(message: Message, bot: Bot) -> None:
 
         await _log_event(session, "msg_in", chat_id, {"type": message.content_type})
 
-        # Inbox card
         name = _display_name(message)
-        if media_type == "voice":
-            title = f"{name} · Голосовое сообщение"
-            body = (
-                f"Расшифровка голосового:\n«{transcript}»"
-                if transcript
-                else "Не удалось расшифровать — оригинал выше."
+        inbound_text = user_text or (
+            f"[голос] {transcript}" if transcript and media_type == "voice" else ""
+        ) or (
+            f"[кружок] {transcript}" if transcript and media_type == "video_note" else ""
+        ) or f"({message.content_type})"
+
+        # Owner inbox: ONLY voice / video-note transcriptions (not every text)
+        if media_type in ("voice", "video_note"):
+            title = (
+                f"{name} · Голосовое"
+                if media_type == "voice"
+                else f"{name} · Видеосообщение"
             )
-        elif media_type == "video_note":
-            title = f"{name} · Видеосообщение"
             body = (
                 f"Расшифровка:\n«{transcript}»"
                 if transcript
                 else "Не удалось расшифровать — оригинал выше."
             )
-        else:
-            title = f"{name} · Сообщение"
-            body = user_text or f"({message.content_type})"
+            try:
+                await _send_inbox(
+                    bot,
+                    title=title,
+                    body=body,
+                    chat_id=chat_id,
+                    media_file_id=media_file_id,
+                    media_type=media_type,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Inbox send failed: %s", exc)
 
-        try:
-            await _send_inbox(
-                bot,
-                title=title,
-                body=body,
-                chat_id=chat_id,
-                media_file_id=media_file_id,
-                media_type=media_type,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Inbox send failed: %s", exc)
+        await session.flush()
+        await _push_dialog_to_crm(dialog)
+        await _push_message(
+            chat_id,
+            "in",
+            inbound_text,
+            tg_message_id=message.message_id,
+        )
 
         if _is_blocked(dialog, now):
             await session.commit()
@@ -421,7 +450,6 @@ async def on_business_message(message: Message, bot: Bot) -> None:
 
         await _sync_crm_events(dialog, cfg, result.crm_events, message)
 
-        # Persist qualification into CRM
         if (
             cfg.get("crm_sync", True)
             and crm.enabled
@@ -455,6 +483,15 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             )
 
         reply = result.reply
+        if reply:
+            ok, reason = guard_client_text(reply)
+            if not ok:
+                logger.warning("Outbound blocked by guard (%s)", reason)
+                reply = (
+                    "Зафиксируем задачу коротко — напишите «1» (сайт/лендинг) "
+                    "или «2» (бот/автоматизация), дальше менеджер продолжит."
+                )
+
         if reply and not result.assist_only and mode not in ("MANUAL", "SILENT", "TAKEOVER", "ASSIST"):
             limits = cfg.get("limits") or {}
             max_chars = int(limits.get("max_chars") or 900)
@@ -467,7 +504,9 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             )
             dialog.last_outbound_at = datetime.now(timezone.utc)
             await _log_event(session, "msg_out", chat_id, {"state": result.new_state})
+            await _push_message(chat_id, "out", reply)
         elif reply and (result.assist_only or mode == "ASSIST"):
+            await _push_message(chat_id, "out", f"[черновик] {reply}")
             if settings.owner_chat_id:
                 await bot.send_message(
                     settings.owner_chat_id,

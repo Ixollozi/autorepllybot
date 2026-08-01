@@ -1,3 +1,3 @@
-from app.bot import handlers_business, handlers_owner
+"""Bot package — import handlers from submodules directly."""
 
-__all__ = ["handlers_business", "handlers_owner"]
+__all__: list[str] = []

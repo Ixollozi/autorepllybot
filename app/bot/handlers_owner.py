@@ -8,7 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
-from app.bot.keyboards import SETTINGS_CYCLES, owner_home_keyboard, settings_keyboard
+from app.bot.keyboards import owner_home_keyboard
 from app.bot.settings_store import get_settings_dict, update_setting
 from app.config import settings
 from app.crm.client import crm
@@ -83,9 +83,9 @@ async def cmd_start(message: Message) -> None:
         cfg = await get_settings_dict(session)
     await message.answer(
         "NST AutoReply inbox готов.\n"
-        f"Режим: {cfg.get('reply_mode')} · ночь: {cfg.get('night_policy')}\n"
-        "Пульт → Связь → «Подключить бота», если CRM ещё не связана.\n"
-        "Команды: /settings /status",
+        f"Режим: {cfg.get('reply_mode')} · ночь: {cfg.get('night_policy')}\n\n"
+        "Управление — в пульте Mini App.\n"
+        "В этот чат приходят только расшифровки голосовых и эскалации.",
         reply_markup=owner_home_keyboard(),
     )
 
@@ -94,9 +94,10 @@ async def cmd_start(message: Message) -> None:
 async def cmd_settings(message: Message) -> None:
     if settings.owner_chat_id and message.chat.id != settings.owner_chat_id:
         return
-    async with SessionLocal() as session:
-        cfg = await get_settings_dict(session)
-    await message.answer("Настройки NST AutoReply", reply_markup=settings_keyboard(cfg))
+    await message.answer(
+        "Настройки переехали в пульт Mini App.",
+        reply_markup=owner_home_keyboard(),
+    )
 
 
 @router.message(Command("status"))
@@ -170,53 +171,31 @@ async def cb_settings_open(query: CallbackQuery) -> None:
     if settings.owner_chat_id and query.message and query.message.chat.id != settings.owner_chat_id:
         await query.answer("Нет доступа", show_alert=True)
         return
-    async with SessionLocal() as session:
-        cfg = await get_settings_dict(session)
-    await query.message.answer("Настройки", reply_markup=settings_keyboard(cfg))
+    await query.message.answer(
+        "Настройки — в пульте Mini App.",
+        reply_markup=owner_home_keyboard(),
+    )
     await query.answer()
 
 
 @router.callback_query(F.data.startswith("settings:cycle:"))
 async def cb_settings_cycle(query: CallbackQuery) -> None:
-    if settings.owner_chat_id and query.message and query.message.chat.id != settings.owner_chat_id:
-        await query.answer("Нет доступа", show_alert=True)
-        return
-    key = (query.data or "").split(":")[-1]
-    values = SETTINGS_CYCLES.get(key)
-    if not values:
-        await query.answer("Неизвестный параметр")
-        return
-    async with SessionLocal() as session:
-        cfg = await get_settings_dict(session)
-        current = cfg.get(key)
-        try:
-            idx = values.index(current)
-        except ValueError:
-            idx = -1
-        new_val = values[(idx + 1) % len(values)]
-        cfg = await update_setting(session, key, new_val)
-    await query.message.edit_reply_markup(reply_markup=settings_keyboard(cfg))
-    await query.answer(f"{key} → {new_val}")
+    await query.answer("Откройте пульт Mini App", show_alert=True)
+    if query.message:
+        await query.message.answer(
+            "Режимы и политики — во вкладке «Режимы» пульта.",
+            reply_markup=owner_home_keyboard(),
+        )
 
 
-@router.callback_query(F.data == "settings:toggle:stt")
-async def cb_toggle_stt(query: CallbackQuery) -> None:
-    async with SessionLocal() as session:
-        cfg = await get_settings_dict(session)
-        stt = dict(cfg.get("stt") or {})
-        stt["enabled"] = not stt.get("enabled", True)
-        cfg = await update_setting(session, "stt", stt)
-    await query.message.edit_reply_markup(reply_markup=settings_keyboard(cfg))
-    await query.answer(f"STT → {stt['enabled']}")
-
-
-@router.callback_query(F.data == "settings:toggle:crm_sync")
-async def cb_toggle_crm(query: CallbackQuery) -> None:
-    async with SessionLocal() as session:
-        cfg = await get_settings_dict(session)
-        cfg = await update_setting(session, "crm_sync", not cfg.get("crm_sync", True))
-    await query.message.edit_reply_markup(reply_markup=settings_keyboard(cfg))
-    await query.answer(f"CRM → {cfg.get('crm_sync')}")
+@router.callback_query(F.data.in_({"settings:toggle:stt", "settings:toggle:crm_sync"}))
+async def cb_settings_toggle_legacy(query: CallbackQuery) -> None:
+    await query.answer("Откройте пульт Mini App", show_alert=True)
+    if query.message:
+        await query.message.answer(
+            "Тумблеры STT / CRM — на главном экране пульта.",
+            reply_markup=owner_home_keyboard(),
+        )
 
 
 @router.callback_query(F.data == "settings:test_card")
@@ -224,8 +203,8 @@ async def cb_test_card(query: CallbackQuery) -> None:
     from app.bot.keyboards import inbox_keyboard
 
     await query.message.answer(
-        "Test User · Голосовое сообщение\n"
-        "Расшифровка голосового:\n"
+        "Test User · Голосовое\n"
+        "Расшифровка:\n"
         "«Тестовая расшифровка для проверки карточки inbox.»",
         reply_markup=inbox_keyboard(0),
     )

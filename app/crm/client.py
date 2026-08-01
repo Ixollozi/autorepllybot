@@ -250,5 +250,30 @@ class CrmClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def append_message(
+        self,
+        *,
+        chat_id: int,
+        role: str,
+        text: str,
+        tg_message_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        await self.refresh_from_db()
+        if not self.enabled or not (text or "").strip():
+            return None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self.base}/api/integrations/autoreply/dialogs/messages/one",
+                headers=self._headers(),
+                json={
+                    "chat_id": chat_id,
+                    "role": role,
+                    "text": text[:8000],
+                    "tg_message_id": tg_message_id,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
 
 crm = CrmClient()
