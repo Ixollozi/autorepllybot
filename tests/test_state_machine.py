@@ -22,8 +22,17 @@ def test_depth_transitions():
 
 def test_tz_summary_no_price():
     text = build_tz_summary(
-        {"fork": "landing", "q1": "заявка", "q2": "лого", "q3": "главная"}
+        {"fork": "landing_lead", "q1": "заявка", "q2": "лого", "q3": "главная"}
     )
-    assert "стоимость" in text.lower() or "Без оценки" in text
+    assert "лендинг" in text.lower()
+    assert "стоимость" not in text.lower()
     assert "сум" not in text.lower()
     assert "$" not in text
+    assert "коммерц" in text.lower()
+
+
+def test_parse_fork_natural():
+    assert parse_fork("нужен сайт для клиники") == "1"
+    assert parse_fork("хотим телеграм бота") == "2"
+    assert parse_fork("и сайт и бот") is None
+    assert parse_fork("1") == "1"

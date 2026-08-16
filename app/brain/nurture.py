@@ -10,15 +10,26 @@ from app.bot.settings_store import get_settings_dict
 from app.db.models import Dialog
 from app.db.session import SessionLocal
 
+from app.bot.timeutil import is_future, now_utc
+
 logger = logging.getLogger("nst.autoreply.nurture")
 
 FOLLOWUP_TEXTS = {
-    "WAIT_FORK": "На всякий случай: напишите «1» или «2» — так быстрее зафиксируем формат.",
-    "BRIEF_Q1": "Остался короткий вопрос по главному действию посетителя — и сможем собрать ТЗ.",
-    "BRIEF_Q2": "Если удобно — что из материалов уже есть (лого/фото/тексты)?",
-    "BRIEF_Q3": "Уточните объём разделов — и соберу резюме задачи.",
-    "BRIEF_Q4": "Если есть желаемая дата запуска — напишите, это для менеджера.",
-    "WAIT_TZ_CONFIRM": "Проверьте резюме выше — всё верно? Напишите «да» или что поправить.",
+    "WAIT_FORK": (
+        "На всякий случай 👋\n\n"
+        "Напишите «1» или «2» — так быстрее зафиксируем формат."
+    ),
+    "BRIEF_Q1": (
+        "Остался короткий вопрос по главному действию посетителя — "
+        "и сможем собрать резюме ✍️"
+    ),
+    "BRIEF_Q2": "Если удобно — что из материалов уже есть (лого / фото / тексты)? 📎",
+    "BRIEF_Q3": "Уточните объём разделов — и соберу резюме задачи 📋",
+    "BRIEF_Q4": "Если есть желаемая дата запуска — напишите, это для менеджера 🗓",
+    "WAIT_TZ_CONFIRM": (
+        "Проверьте резюме выше — всё верно?\n\n"
+        "Напишите «да» или что поправить ✅"
+    ),
 }
 
 
@@ -28,7 +39,7 @@ async def run_nurture_tick(bot: Bot) -> None:
         nurture = cfg.get("nurture") or "soft"
         if nurture == "off":
             return
-        now = datetime.now(timezone.utc)
+        now = now_utc()
         min_age = timedelta(hours=4 if nurture == "soft" else 3)
         rows = (
             await session.scalars(
@@ -39,9 +50,9 @@ async def run_nurture_tick(bot: Bot) -> None:
             )
         ).all()
         for dialog in rows:
-            if dialog.takeover_until and dialog.takeover_until > now:
+            if is_future(dialog.takeover_until, relative_to=now):
                 continue
-            if dialog.paused_until and dialog.paused_until > now:
+            if is_future(dialog.paused_until, relative_to=now):
                 continue
             if not dialog.business_connection_id:
                 continue

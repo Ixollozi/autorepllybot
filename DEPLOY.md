@@ -1,5 +1,7 @@
 # Деплой NST AutoReply + CRM integration
 
+> Краткая инструкция также в [`README.md`](README.md) §8–9.
+
 ## 1. CRM (обязательно первым)
 
 На VPS с `https://crm.neosamptech.uz`:

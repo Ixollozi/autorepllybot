@@ -10,8 +10,15 @@ def miniapp_url(path: str = "") -> str:
     return f"{base}{path if path.startswith('?') or path.startswith('/') else '/' + path}"
 
 
-def inbox_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    """Compact actions for voice/escalation cards only."""
+def inbox_keyboard(chat_id: int, *, bot_active: bool = True) -> InlineKeyboardMarkup:
+    """Escalation/voice card actions. Active mode marked with ✅."""
+    if bot_active:
+        take_text = "Взять диалог"
+        bot_text = "Бот отвечает ✅"
+    else:
+        take_text = "Вы ведёте ✅"
+        bot_text = "Бот снова"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -22,10 +29,10 @@ def inbox_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Взять диалог", callback_data=f"chat:takeover:{chat_id}"
+                    text=take_text, callback_data=f"chat:takeover:{chat_id}"
                 ),
                 InlineKeyboardButton(
-                    text="Бот снова", callback_data=f"chat:resume:{chat_id}"
+                    text=bot_text, callback_data=f"chat:resume:{chat_id}"
                 ),
             ],
         ]

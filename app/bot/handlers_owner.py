@@ -8,7 +8,8 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
-from app.bot.keyboards import owner_home_keyboard
+from app.bot.keyboards import inbox_keyboard, owner_home_keyboard
+from app.bot.labels import mode_ru, night_ru
 from app.bot.settings_store import get_settings_dict, update_setting
 from app.config import settings
 from app.crm.client import crm
@@ -17,6 +18,30 @@ from app.db.session import SessionLocal
 
 logger = logging.getLogger("nst.autoreply.owner")
 router = Router(name="owner")
+
+
+def _bot_active(dialog: Dialog | None) -> bool:
+    from app.bot.timeutil import is_future, now_utc
+
+    if dialog is None:
+        return True
+    now = now_utc()
+    if is_future(dialog.takeover_until, relative_to=now):
+        return False
+    if is_future(dialog.paused_until, relative_to=now):
+        return False
+    return True
+
+
+async def _refresh_inbox_keyboard(query: CallbackQuery, chat_id: int, bot_active: bool) -> None:
+    if not query.message:
+        return
+    try:
+        await query.message.edit_reply_markup(
+            reply_markup=inbox_keyboard(chat_id, bot_active=bot_active)
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("edit_reply_markup skipped chat=%s", chat_id)
 
 
 def _is_owner(message: Message) -> bool:
@@ -82,10 +107,11 @@ async def cmd_start(message: Message) -> None:
     async with SessionLocal() as session:
         cfg = await get_settings_dict(session)
     await message.answer(
-        "NST AutoReply inbox готов.\n"
-        f"Режим: {cfg.get('reply_mode')} · ночь: {cfg.get('night_policy')}\n\n"
-        "Управление — в пульте Mini App.\n"
-        "В этот чат приходят только расшифровки голосовых и эскалации.",
+        "✅ Inbox AutoReply готов\n\n"
+        f"Сейчас: {mode_ru(str(cfg.get('reply_mode')))}\n"
+        f"Ночью: {night_ru(str(cfg.get('night_policy')))}\n\n"
+        "Управление — в пульте.\n"
+        "Сюда приходят расшифровки голосовых и когда нужен человек.",
         reply_markup=owner_home_keyboard(),
     )
 
@@ -274,7 +300,8 @@ async def cb_takeover(query: CallbackQuery) -> None:
             dialog.takeover_until = datetime.now(timezone.utc) + timedelta(hours=2)
             dialog.state = "HUMAN_TAKEOVER"
             await session.commit()
-    await query.answer("Takeover включён")
+    await _refresh_inbox_keyboard(query, chat_id, bot_active=False)
+    await query.answer("Диалог у вас — бот молчит")
 
 
 @router.callback_query(F.data.startswith("chat:resume:"))
@@ -288,4 +315,5 @@ async def cb_resume(query: CallbackQuery) -> None:
             if dialog.state == "HUMAN_TAKEOVER":
                 dialog.state = "NURTURE"
             await session.commit()
-    await query.answer("Бот снова активен")
+    await _refresh_inbox_keyboard(query, chat_id, bot_active=True)
+    await query.answer("Бот снова отвечает")

@@ -164,6 +164,43 @@ class CrmClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def add_touch(
+        self, lead_id: int, *, touch_type: str = "telegram", comment: str | None = None
+    ) -> dict:
+        await self.refresh_from_db()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self.base}/api/integrations/autoreply/{lead_id}/touches",
+                headers=self._headers(),
+                json={"touch_type": touch_type, "comment": comment},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def add_task(
+        self,
+        lead_id: int,
+        *,
+        title: str,
+        description: str | None = None,
+        priority: str = "high",
+        external_key: str | None = None,
+    ) -> dict:
+        await self.refresh_from_db()
+        body: dict[str, Any] = {"title": title, "priority": priority}
+        if description:
+            body["description"] = description
+        if external_key:
+            body["external_key"] = external_key
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self.base}/api/integrations/autoreply/{lead_id}/tasks",
+                headers=self._headers(),
+                json=body,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     async def post_event(
         self,
         lead_id: int,
@@ -202,6 +239,19 @@ class CrmClient:
             resp = await client.get(
                 f"{self.base}/api/integrations/autoreply/settings",
                 headers=self._headers(),
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def ack_dialog_actions(self, action_ids: list[str]) -> dict[str, Any] | None:
+        await self.refresh_from_db()
+        if not self.enabled or not action_ids:
+            return None
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                f"{self.base}/api/integrations/autoreply/dialog-actions/ack",
+                headers=self._headers(),
+                json={"ids": action_ids},
             )
             resp.raise_for_status()
             return resp.json()

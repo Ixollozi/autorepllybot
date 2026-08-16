@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     gemini_api_keys: str = ""
     gemini_model: str = "gemini-2.0-flash"
 
-    whisper_model: str = "base"
+    whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
 

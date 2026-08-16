@@ -1,8 +1,11 @@
 # AutoReply × CRM — Telegram Mini App (архитектура)
 
+> **Актуальный обзор пульта — в [`README.md`](README.md) §4.**  
+> Этот файл — детальный черновик архитектуры M0–M4 (2026-08-01).
+
 **Дата:** 2026-08-01  
-**Статус:** M0+M1 в коде · UI `/mini_app` · auth initData · settings SoT · бот pull + Menu Button  
-**Хостинг:** CRM `https://crm.neosamptech.uz/mini_app` (или `/autoreply/`)  
+**Статус:** M0–M2 в коде · M3 drafts open · UI `/mini_app`  
+**Хостинг:** CRM `https://crm.neosamptech.uz/mini_app`  
 **Бот:** `@autorepllybot` открывает Mini App кнопкой / Menu Button
 
 ---

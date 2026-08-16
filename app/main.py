@@ -15,7 +15,7 @@ from app.analytics.weekly import send_weekly_digest
 from app.bot.handlers_business import router as business_router
 from app.bot.handlers_owner import router as owner_router
 from app.bot.keyboards import miniapp_url
-from app.bot.settings_store import apply_crm_settings
+from app.bot.settings_store import apply_crm_settings, apply_pending_dialog_actions
 from app.brain.nurture import run_nurture_tick
 from app.config import settings
 from app.crm.client import crm
@@ -40,10 +40,15 @@ async def pull_crm_settings_once(log: logging.Logger) -> None:
             return
         async with SessionLocal() as session:
             await apply_crm_settings(session, remote)
+            applied = await apply_pending_dialog_actions(session, remote)
+        if applied:
+            await crm.ack_dialog_actions(applied)
+            log.info("Applied %d Mini App dialog actions", len(applied))
         log.info(
-            "CRM settings pulled version=%s mode=%s",
+            "CRM settings pulled version=%s mode=%s pending=%s",
             remote.get("version"),
             remote.get("reply_mode"),
+            len(remote.get("pending_dialog_actions") or []),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("CRM settings pull failed: %s", exc)
@@ -76,7 +81,7 @@ async def background_loops(bot: Bot) -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("nurture tick failed: %s", exc)
 
-        # Pull Mini App settings every cycle (~5 min) + heartbeat
+        # Pull Mini App settings every ~45s so takeover/resume apply quickly
         await pull_crm_settings_once(log)
         await heartbeat_once(log)
 
@@ -94,7 +99,7 @@ async def background_loops(bot: Bot) -> None:
                 last_weekly_day = now.toordinal()
         except Exception as exc:  # noqa: BLE001
             log.warning("weekly digest failed: %s", exc)
-        await asyncio.sleep(300)
+        await asyncio.sleep(45)
 
 
 async def set_menu_button(bot: Bot, log: logging.Logger) -> None:
@@ -120,6 +125,7 @@ async def main() -> None:
     await init_db()
     log.info("DB ready")
 
+    await crm.refresh_from_db()
     if crm.enabled:
         try:
             keys = await crm.get_llm_keys(force=True)
@@ -132,7 +138,7 @@ async def main() -> None:
             log.warning("CRM llm-keys unavailable at startup: %s", exc)
         await pull_crm_settings_once(log)
     else:
-        log.warning("CRM not configured (AUTOREPLY_API_KEY empty)")
+        log.warning("CRM not configured (set Mini App → Связь or AUTOREPLY_API_KEY)")
 
     bot = Bot(
         token=settings.bot_token,

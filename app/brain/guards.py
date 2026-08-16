@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 PRICE_RE = re.compile(
     r"(?i)("
@@ -35,10 +36,27 @@ def contains_deadline_promise(text: str) -> bool:
     return bool(DEADLINE_RE.search(text or ""))
 
 
+def contains_foreign_script(text: str) -> bool:
+    """True if text has letters outside RU/UZ Cyrillic + Latin.
+
+    LLMs sometimes inject CJK (e.g. 細 instead of «дет» in «деталей»).
+    """
+    for ch in text or "":
+        if ch.isspace() or not ch.isalpha():
+            continue
+        name = unicodedata.name(ch, "")
+        if name.startswith("CYRILLIC") or name.startswith("LATIN"):
+            continue
+        return True
+    return False
+
+
 def guard_client_text(text: str) -> tuple[bool, str]:
     """Return (ok, reason). ok=False means must not send."""
     if contains_price(text):
         return False, "price"
     if contains_deadline_promise(text):
         return False, "deadline"
+    if contains_foreign_script(text):
+        return False, "foreign_script"
     return True, ""

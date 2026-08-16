@@ -8,14 +8,25 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction, ContentType
-from aiogram.types import BusinessConnection, Message
+from aiogram.types import BusinessConnection, BusinessMessagesDeleted, Message
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.bot.keyboards import inbox_keyboard
-from app.bot.settings_store import effective_reply_mode, get_settings_dict
+from app.bot.settings_store import (
+    apply_crm_settings,
+    apply_pending_dialog_actions,
+    effective_reply_mode,
+    get_settings_dict,
+)
 from app.brain.guards import guard_client_text
-from app.brain.sales import handle_sales_turn
+from app.brain.loop_guard import mark_allow_greeting_restart
+from app.brain.sales import (
+    brief_for_crm_json,
+    brief_to_crm_patch,
+    handle_sales_turn,
+    script_fields_for_crm,
+)
 from app.config import settings
 from app.crm.client import crm
 from app.db.models import (
@@ -25,12 +36,30 @@ from app.db.models import (
     ProcessedMessage,
     Transcript,
     dumps_brief,
+    loads_brief,
 )
 from app.db.session import SessionLocal
-from app.stt.whisper_stt import download_and_transcribe
+from app.stt.whisper_stt import download_and_transcribe_rich
 
 logger = logging.getLogger("nst.autoreply.business")
 router = Router(name="business")
+
+
+async def _sync_miniapp_actions(session) -> None:
+    """Pull Mini App takeover/resume before deciding whether to reply."""
+    if not crm.enabled:
+        return
+    try:
+        remote = await crm.get_settings()
+        if not remote:
+            return
+        await apply_crm_settings(session, remote)
+        applied = await apply_pending_dialog_actions(session, remote)
+        if applied:
+            await crm.ack_dialog_actions(applied)
+            logger.info("Synced %d Mini App dialog actions on inbound", len(applied))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Mini App action sync failed: %s", exc)
 
 
 def _display_name(message: Message) -> str:
@@ -151,11 +180,46 @@ async def _get_or_create_dialog(
 
 
 def _is_blocked(dialog: Dialog, now: datetime) -> bool:
-    if dialog.paused_until and dialog.paused_until > now:
+    from app.bot.timeutil import aware, is_future
+
+    now = aware(now) or now
+    if is_future(dialog.paused_until, relative_to=now):
         return True
-    if dialog.takeover_until and dialog.takeover_until > now:
+    if is_future(dialog.takeover_until, relative_to=now):
         return True
     return False
+
+
+def _bot_active_for_inbox(dialog: Dialog | None, now: datetime | None = None) -> bool:
+    """True = bot replies to client; False = human takeover/pause."""
+    from app.bot.timeutil import aware, is_future, now_utc
+
+    if dialog is None:
+        return True
+    now = aware(now) or now_utc()
+    if is_future(dialog.takeover_until, relative_to=now):
+        return False
+    if is_future(dialog.paused_until, relative_to=now):
+        return False
+    # HUMAN_TAKEOVER without active takeover window = stale; treat as bot-active
+    # only when window still open (set on escalate + takeover button).
+    if dialog.state == "HUMAN_TAKEOVER" and is_future(dialog.takeover_until, relative_to=now):
+        return False
+    return True
+
+
+def _clear_expired_takeover(dialog: Dialog, now: datetime) -> None:
+    """Unstick dialogs left in HUMAN_TAKEOVER after window expired."""
+    from app.bot.timeutil import aware, is_future
+
+    now = aware(now) or now
+    takeover = aware(dialog.takeover_until)
+    if dialog.state == "HUMAN_TAKEOVER":
+        if takeover is None or not is_future(takeover, relative_to=now):
+            dialog.takeover_until = None
+            dialog.state = "WAIT_FORK"
+    elif takeover is not None and not is_future(takeover, relative_to=now):
+        dialog.takeover_until = None
 
 
 async def _tempo_delay(tempo: str, bot: Bot, chat_id: int, business_connection_id: str):
@@ -188,12 +252,12 @@ async def _send_inbox(
     if not settings.owner_chat_id:
         logger.warning("OWNER_CHAT_ID empty — skip inbox")
         return
-    kb = inbox_keyboard(chat_id)
+    kb = inbox_keyboard(chat_id, bot_active=True)
     if media_file_id and media_type == "voice":
         await bot.send_voice(settings.owner_chat_id, media_file_id)
     elif media_file_id and media_type == "video_note":
         await bot.send_video_note(settings.owner_chat_id, media_file_id)
-    text = f"{title}\n{body}"
+    text = f"{title}\n\n{body}"
     await bot.send_message(settings.owner_chat_id, text[:4000], reply_markup=kb)
 
 
@@ -201,14 +265,17 @@ async def _sync_crm_events(dialog: Dialog, cfg: dict, events: list[dict], messag
     if not cfg.get("crm_sync", True) or not crm.enabled:
         return
     try:
+        depth = cfg.get("sales_depth") or "full_tz"
+        brief = loads_brief(dialog.brief_json)
         if not dialog.crm_lead_id:
-            lead = await crm.upsert(
-                {
-                    "telegram": _telegram_ref(message),
-                    "contact_name": dialog.display_name,
-                    "niche": dialog.niche,
-                }
-            )
+            upsert_body = {
+                "telegram": _telegram_ref(message),
+                "contact_name": dialog.display_name,
+                "niche": dialog.niche or brief.get("niche"),
+                "status": "Написал",
+                **script_fields_for_crm(brief, sales_depth=depth, stage="upsert"),
+            }
+            lead = await crm.upsert(upsert_body)
             dialog.crm_lead_id = lead["id"]
         for ev in events:
             ext = (
@@ -262,6 +329,31 @@ async def on_business_connection(event: BusinessConnection, bot: Bot) -> None:
         )
 
 
+@router.deleted_business_messages()
+async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
+    """Client wiped chat history → next «привет» may restart greeting once."""
+    chat_id = event.chat.id if event.chat else None
+    if chat_id is None:
+        return
+    ids = list(event.message_ids or [])
+    if len(ids) < 2:
+        # Single delete is not a wipe; ignore.
+        return
+    async with SessionLocal() as session:
+        dialog = await session.scalar(select(Dialog).where(Dialog.chat_id == chat_id))
+        if not dialog:
+            return
+        brief = loads_brief(dialog.brief_json)
+        mark_allow_greeting_restart(brief)
+        dialog.brief_json = dumps_brief(brief)
+        await session.commit()
+        logger.info(
+            "Chat wipe signal chat=%s deleted=%s → allow greeting restart",
+            chat_id,
+            len(ids),
+        )
+
+
 @router.business_message()
 async def on_business_message(message: Message, bot: Bot) -> None:
     # Outgoing from bot itself — ignore
@@ -289,6 +381,8 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             await session.rollback()
             return
 
+        await _sync_miniapp_actions(session)
+
         cfg = await get_settings_dict(session)
         ignore = set(cfg.get("ignore_list") or [])
         if str(chat_id) in ignore or (
@@ -305,58 +399,104 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             business_connection_id=biz_id,
             message=message,
         )
-        dialog.last_inbound_at = now
+        _clear_expired_takeover(dialog, now)
 
-        # Owner replied from phone: message.from_user is business account owner
-        # Detect: if from_user.id matches connection user — takeover
+        # Human (business owner) wrote in this chat → bot stays silent
+        from app.bot.timeutil import is_future
+
         conn = await session.scalar(
             select(BusinessConnectionRow).where(
                 BusinessConnectionRow.connection_id == biz_id
             )
         )
-        if (
-            conn
-            and message.from_user
-            and message.from_user.id == conn.user_id
-        ):
-            dialog.takeover_until = now + timedelta(hours=2)
+        from_id = message.from_user.id if message.from_user else None
+        chat_peer = message.chat.id if message.chat else None
+        owner_by_conn = bool(conn and from_id and from_id == conn.user_id)
+        owner_by_env = bool(
+            from_id and settings.owner_chat_id and from_id == settings.owner_chat_id
+        )
+        # Private Business chat: client inbound → from_user.id == chat.id;
+        # owner outbound → from_user is owner, chat.id is client.
+        owner_by_peer = bool(from_id and chat_peer and from_id != chat_peer)
+        if owner_by_conn or owner_by_env or owner_by_peer:
+            already = dialog.state == "HUMAN_TAKEOVER" and is_future(
+                dialog.takeover_until, relative_to=now
+            )
+            dialog.takeover_until = now + timedelta(hours=4)
             dialog.state = "HUMAN_TAKEOVER"
-            await _log_event(session, "takeover", chat_id, {"reason": "owner_outbound"})
+            await _log_event(
+                session,
+                "takeover",
+                chat_id,
+                {
+                    "reason": "owner_outbound",
+                    "via": (
+                        "conn"
+                        if owner_by_conn
+                        else ("owner_chat" if owner_by_env else "peer_mismatch")
+                    ),
+                },
+            )
             await session.commit()
             await _push_dialog_to_crm(dialog)
-            if settings.owner_chat_id:
+            out_text = (message.text or message.caption or "").strip()
+            if out_text:
+                await _push_message(chat_id, "out", f"[вы] {out_text[:2000]}")
+            if not already and settings.owner_chat_id:
+                from app.bot.labels import stage_ru
+
                 await bot.send_message(
                     settings.owner_chat_id,
-                    f"Takeover: вы ответили вручную в чате {_display_name(message)}",
+                    (
+                        "👤 Вы в диалоге — бот замолчал\n\n"
+                        f"Клиент: {_display_name(message)}\n"
+                        f"Сейчас: {stage_ru('HUMAN_TAKEOVER')}"
+                    ),
+                    reply_markup=inbox_keyboard(chat_id, bot_active=False),
                 )
             return
+
+        dialog.last_inbound_at = now
 
         stt_cfg = cfg.get("stt") or {}
         user_text = (message.text or message.caption or "").strip()
         media_file_id = None
         media_type = None
         transcript = None
+        stt_meta = None
 
         if message.content_type == ContentType.VOICE and stt_cfg.get("enabled", True) and stt_cfg.get("voice", True):
             media_file_id = message.voice.file_id
             media_type = "voice"
             try:
-                transcript, lang = await download_and_transcribe(
+                stt_meta = await download_and_transcribe_rich(
                     bot, message.voice.file_id, language="ru"
                 )
+                transcript = stt_meta.text or None
                 user_text = transcript or user_text
                 session.add(
                     Transcript(
                         chat_id=chat_id,
                         message_id=message.message_id,
                         text=transcript or "",
-                        lang=lang,
+                        lang=stt_meta.language,
                     )
                 )
-                await _log_event(session, "stt_ok", chat_id, {"len": len(transcript or "")})
+                await _log_event(
+                    session,
+                    "stt_ok",
+                    chat_id,
+                    {
+                        "len": len(transcript or ""),
+                        "provider": stt_meta.provider,
+                        "logprob": stt_meta.avg_logprob,
+                        "low_confidence": stt_meta.low_confidence,
+                    },
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("STT failed: %s", exc)
                 transcript = None
+                stt_meta = None
                 await _log_event(session, "stt_fail", chat_id, {"error": str(exc)})
 
         elif (
@@ -367,21 +507,32 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             media_file_id = message.video_note.file_id
             media_type = "video_note"
             try:
-                transcript, lang = await download_and_transcribe(
+                stt_meta = await download_and_transcribe_rich(
                     bot, message.video_note.file_id, language="ru"
                 )
+                transcript = stt_meta.text or None
                 user_text = transcript or user_text
                 session.add(
                     Transcript(
                         chat_id=chat_id,
                         message_id=message.message_id,
                         text=transcript or "",
-                        lang=lang,
+                        lang=stt_meta.language,
                     )
                 )
-                await _log_event(session, "stt_ok", chat_id, {})
+                await _log_event(
+                    session,
+                    "stt_ok",
+                    chat_id,
+                    {
+                        "provider": stt_meta.provider,
+                        "logprob": stt_meta.avg_logprob,
+                        "low_confidence": stt_meta.low_confidence,
+                    },
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("STT video_note failed: %s", exc)
+                stt_meta = None
                 await _log_event(session, "stt_fail", chat_id, {"error": str(exc)})
 
         await _log_event(session, "msg_in", chat_id, {"type": message.content_type})
@@ -395,20 +546,23 @@ async def on_business_message(message: Message, bot: Bot) -> None:
 
         # Owner inbox: ONLY voice / video-note transcriptions (not every text)
         if media_type in ("voice", "video_note"):
-            title = (
-                f"{name} · Голосовое"
-                if media_type == "voice"
-                else f"{name} · Видеосообщение"
-            )
+            from app.bot.labels import stt_provider_ru
+
+            kind = "голосовое" if media_type == "voice" else "видеосообщение"
+            conf_note = ""
+            if stt_meta is not None:
+                conf_note = f"\n\nРаспознавание: {stt_provider_ru(stt_meta.provider)}"
+                if stt_meta.low_confidence:
+                    conf_note += "\n⚠️ Низкая уверенность — лучше переслушать"
             body = (
-                f"Расшифровка:\n«{transcript}»"
+                f"Расшифровка:\n«{transcript}»{conf_note}"
                 if transcript
-                else "Не удалось расшифровать — оригинал выше."
+                else f"Не удалось расшифровать — оригинал выше.{conf_note}"
             )
             try:
                 await _send_inbox(
                     bot,
-                    title=title,
+                    title=f"🎤 {name} · {kind}",
                     body=body,
                     chat_id=chat_id,
                     media_file_id=media_file_id,
@@ -431,7 +585,9 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             return
 
         mode = effective_reply_mode(cfg, now)
-        if dialog.state == "HUMAN_TAKEOVER" and dialog.takeover_until and dialog.takeover_until > now:
+        from app.bot.timeutil import is_future
+
+        if dialog.state == "HUMAN_TAKEOVER" and is_future(dialog.takeover_until, relative_to=now):
             mode = "TAKEOVER"
 
         if not user_text and not transcript:
@@ -445,12 +601,16 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             settings=cfg,
             mode=mode,
             niche_hint=dialog.niche,
+            last_outbound_at=dialog.last_outbound_at,
         )
 
         dialog.state = result.new_state
         dialog.brief_json = dumps_brief(result.brief)
         if result.brief.get("niche"):
             dialog.niche = result.brief["niche"]
+        if result.escalate and result.new_state == "HUMAN_TAKEOVER":
+            # Window so Mini App / inbox show «вы ведёте», and auto-expire
+            dialog.takeover_until = now + timedelta(hours=2)
 
         await _sync_crm_events(dialog, cfg, result.crm_events, message)
 
@@ -461,27 +621,61 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             and result.brief
         ):
             try:
-                await crm.patch(
-                    dialog.crm_lead_id,
-                    {"qualification_json": dumps_brief(result.brief)},
+                patch = brief_to_crm_patch(
+                    result.brief,
+                    sales_depth=cfg.get("sales_depth") or "full_tz",
+                    stage=result.new_state,
                 )
-                if result.brief.get("client_timing_signal"):
-                    await crm.add_note(
-                        dialog.crm_lead_id,
-                        f"Желаемый запуск (сигнал): {result.brief['client_timing_signal']}",
-                    )
+                patch["qualification_json"] = dumps_brief(brief_for_crm_json(result.brief))
+                await crm.patch(dialog.crm_lead_id, patch)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("CRM patch brief failed: %s", exc)
+                if "404" in str(exc):
+                    dialog.crm_lead_id = None
 
-        if result.escalate and settings.owner_chat_id:
-            await bot.send_message(
-                settings.owner_chat_id,
-                f"Нужен человек\n"
-                f"{name} · {result.escalate_reason}\n"
-                f"Стадия: {result.new_state}\n"
-                f"Кратко: {(user_text or '')[:200]}",
-                reply_markup=inbox_keyboard(chat_id),
-            )
+        if result.escalate:
+            if (
+                cfg.get("crm_sync", True)
+                and crm.enabled
+                and dialog.crm_lead_id
+                and result.escalate_reason != "tz_confirmed"
+            ):
+                try:
+                    await crm.post_event(
+                        dialog.crm_lead_id,
+                        external_event_id=(
+                            f"tg:{chat_id}:{message.message_id}:escalation:"
+                            f"{result.escalate_reason or 'need_human'}"
+                        ),
+                        event_type="escalation",
+                        note=(
+                            f"Эскалация: {result.escalate_reason or 'need_human'} · "
+                            f"стадия {result.new_state}"
+                        ),
+                        patch=brief_to_crm_patch(
+                            result.brief,
+                            sales_depth=cfg.get("sales_depth") or "full_tz",
+                            stage=result.new_state,
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("CRM escalation event failed: %s", exc)
+            if settings.owner_chat_id:
+                from app.bot.labels import reason_ru, stage_ru
+
+                await bot.send_message(
+                    settings.owner_chat_id,
+                    (
+                        "🔔 Нужен человек\n\n"
+                        f"Клиент: {name}\n"
+                        f"Почему: {reason_ru(result.escalate_reason)}\n"
+                        f"Сейчас: {stage_ru(result.new_state)}\n\n"
+                        f"Кратко:\n«{(user_text or '')[:200]}»"
+                    ),
+                    reply_markup=inbox_keyboard(
+                        chat_id, bot_active=_bot_active_for_inbox(dialog)
+                    ),
+                )
             await _log_event(
                 session, "escalation", chat_id, {"reason": result.escalate_reason}
             )
@@ -492,8 +686,9 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             if not ok:
                 logger.warning("Outbound blocked by guard (%s)", reason)
                 reply = (
-                    "Зафиксируем задачу коротко — напишите «1» (сайт/лендинг) "
-                    "или «2» (бот/автоматизация), дальше менеджер продолжит."
+                    "Зафиксируем задачу коротко ✍️\n\n"
+                    "Напишите «1» (сайт/лендинг) или «2» (бот/автоматизация) — "
+                    "дальше менеджер продолжит."
                 )
 
         if reply and not result.assist_only and mode not in ("MANUAL", "SILENT", "TAKEOVER", "ASSIST"):
@@ -515,7 +710,9 @@ async def on_business_message(message: Message, bot: Bot) -> None:
                 await bot.send_message(
                     settings.owner_chat_id,
                     f"Черновик для {name}:\n\n{reply}",
-                    reply_markup=inbox_keyboard(chat_id),
+                    reply_markup=inbox_keyboard(
+                        chat_id, bot_active=_bot_active_for_inbox(dialog)
+                    ),
                 )
 
         await _log_event(
@@ -526,3 +723,15 @@ async def on_business_message(message: Message, bot: Bot) -> None:
         )
         await session.commit()
         await _push_dialog_to_crm(dialog)
+
+        await _push_dialog_to_crm(dialog)
+
+
+
+
+
+
+
+
+
+
